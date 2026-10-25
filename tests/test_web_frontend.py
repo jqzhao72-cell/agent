@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from api import server
+from api.memory_store import MemoryStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,29 @@ def test_web_console_favicon_is_available() -> None:
 
     assert favicon.status_code == 200
     assert "image/" in favicon.headers["content-type"]
+
+
+def test_memory_api_restores_messages_and_manages_long_term_memory(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("CHECKPOINT_DB_PATH", str(tmp_path / "checkpoints.db"))
+    store = MemoryStore(tmp_path / "memory.db")
+    store.add_message("thread-memory", "user", "第一轮问题", run_id="run-memory")
+    store.add_message("thread-memory", "assistant", "第一轮回答", run_id="run-memory")
+    remembered = store.remember("偏好简洁回答", category="preference")
+    monkeypatch.setattr(server, "memory_store", store)
+
+    with TestClient(server.app) as client:
+        conversation = client.get("/api/memory/threads/thread-memory")
+        memories = client.get("/api/memories")
+        deleted = client.delete(f"/api/memories/{remembered.id}")
+        cleared = client.delete("/api/memory/threads/thread-memory")
+
+    assert [item["content"] for item in conversation.json()["messages"]] == [
+        "第一轮问题",
+        "第一轮回答",
+    ]
+    assert memories.json()["memories"][0]["content"] == "偏好简洁回答"
+    assert deleted.json()["status"] == "deleted"
+    assert cleared.json()["deleted"] is True
 
 
 def test_frontend_uses_no_external_runtime_or_html_injection_sink() -> None:
@@ -133,8 +157,12 @@ def test_chat_page_exposes_complete_question_workflow() -> None:
         "takeRenderBatch",
         "isExplicitScrollIntent",
         "aria-busy",
+        "historyMessages",
     ):
         assert symbol in script
+
+    run_client = (WEB_ROOT / "run-client.js").read_text(encoding="utf-8")
+    assert "fetchConversation" in run_client
 
 
 def test_historical_session_resets_follow_state_before_switching() -> None:
@@ -146,6 +174,22 @@ def test_historical_session_resets_follow_state_before_switching() -> None:
     assert activate_session.index("resetScrollIntent();") < activate_session.index(
         "store.newSession();",
     )
+
+
+def test_current_and_runless_sessions_restore_persistent_history() -> None:
+    script = (WEB_ROOT / "chat.js").read_text(encoding="utf-8")
+    activate_start = script.index("async function activateSession(session)")
+    activate_end = script.index("async function restoreInitialSession()", activate_start)
+    activate_session = script[activate_start:activate_end]
+    restore_start = activate_end
+    restore_end = script.index("store.subscribe(render)", restore_start)
+    restore_initial = script[restore_start:restore_end]
+
+    assert "!store.snapshot.historyLoaded" in activate_session
+    assert "await runClient.restore(session)" in activate_session
+    assert 'elements["task-input"].focus()' in activate_session
+    assert "if (!initialSelection.runId) return" not in restore_initial
+    assert "shouldRestoreInitialSession" in restore_initial
 
 
 def test_chat_scroll_intent_wiring_cancels_user_and_stale_render_scrolls() -> None:

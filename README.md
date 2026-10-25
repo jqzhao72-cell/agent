@@ -57,9 +57,9 @@
 ### 智能体能力
 
 - 主智能体自动判断任务需要哪些信息源
-- 网络搜索子智能体：调用 Tavily 获取外部资料
+- 网络搜索子智能体：调用阿里云百炼 Qwen 内置联网搜索获取外部资料
 - 数据库查询子智能体：查看 MySQL 表结构、生成 SQL、执行查询
-- 知识库检索子智能体：对接 RAGFlow 检索企业知识库
+- 知识库检索子智能体：可接入桌面已有 DocPilot RAG，或切回 RAGFlow
 - Markdown 报告生成与 PDF 转换工具
 - 上传文件读取工具，任务可以结合用户提供的参考资料
 
@@ -110,9 +110,9 @@ api/server.py
         │
         ▼
 agent/main_agent.py
-  ├── 子智能体 1：网络搜索       tools/tavily_tool.py
+  ├── 子智能体 1：网络搜索       tools/aliyun_search_tool.py
   ├── 子智能体 2：数据库查询     tools/db_tools.py
-  ├── 子智能体 3：RAGFlow 知识库 tools/ragflow_tools.py
+  ├── 子智能体 3：知识库         tools/docpilot_tool.py 或 tools/ragflow_tools.py
   └── 主智能体工具：Markdown / PDF / 上传文件读取
         │
         ▼
@@ -138,10 +138,11 @@ api/monitor.py + api/trace_store.py
 ### 环境要求
 
 - Python 3.10+
-- 一个 OpenAI 兼容的 LLM API Key（阿里云百炼 / DeepSeek / OpenAI 都可以）
-- Tavily API Key（[免费额度注册](https://tavily.com)）
+- 阿里云百炼 API Key 和对应工作空间的 API Host
 
-> 📌 数据库和 RAGFlow 是**可选的**，不配也能跑 —— 主智能体会自动跳过没有的服务。
+> 📌 数据库和知识库服务是可选信息源；使用对应子智能体前，需要先配置并启动该服务。
+
+如果使用桌面已有的 DocPilot 项目，在 `.env` 中设置 `KNOWLEDGE_BACKEND=docpilot`、`DOCPILOT_BASE_URL=http://127.0.0.1:8000`，并填写 DocPilot 登录账号与密码。DocPilot 后端需要单独运行。这个账号的文档权限决定知识库助手能检索哪些资料；DocPilot 内部的 DeepSeek 配置与本项目的百炼配置彼此独立。要切回 RAGFlow，设置 `KNOWLEDGE_BACKEND=ragflow` 并配置 `RAGFLOW_API_URL`、`RAGFLOW_API_KEY`。
 
 ### 第一步：克隆 + 装依赖
 
@@ -157,16 +158,23 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-编辑 `.env`，最少只需要填 3 个：
+编辑 `.env`。主模型和子 Agent 使用 DeepSeek 官网凭证；联网搜索继续单独使用百炼凭证：
 
 ```env
-# 必填：LLM 服务（以阿里云百炼为例）
-OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
-LLM_QWEN_MAX=qwen-max
+# DeepSeek 官网：主模型和子 Agent
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
+LLM_MAIN_MODEL=deepseek-v4-pro
+SUBAGENT_MODEL=deepseek-flash
+LLM_ENABLE_THINKING=false
 
-# 必填：网络搜索
-TAVILY_API_KEY=tvly-xxxxxxxxxxxxxxxx
+# 阿里云百炼：仅用于内置联网搜索
+OPENAI_BASE_URL=https://你的WorkspaceId.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
+
+ALIYUN_SEARCH_MODEL=qwen-flash
+# 可选：联网搜索策略，turbo 较快，max 更深入
+ALIYUN_SEARCH_STRATEGY=turbo
 
 # 以下可选，不填就只影响对应功能
 # RAGFLOW_API_URL=...
@@ -224,7 +232,7 @@ curl -X POST http://localhost:8000/api/task \
 | 1️⃣ | `agent/llm.py` | 看 LLM 怎么初始化，如何适配 OpenAI 兼容协议 |
 | 2️⃣ | `prompt/prompts.yml` | 看系统提示词怎么写，怎么约束 Agent 行为 |
 | 3️⃣ | `agent/subagents/network_search_agent.py` | 最简单的子智能体，理解"子智能体 = 字典配置" |
-| 4️⃣ | `tools/tavily_tool.py` | 一个完整的 @tool 怎么写，埋点怎么做 |
+| 4️⃣ | `tools/aliyun_search_tool.py` | 百炼内置联网搜索工具和埋点怎么写 |
 | 5️⃣ | `agent/main_agent.py` | **核心**：主智能体怎么创建、怎么 orchestrate、怎么流式执行 |
 | 6️⃣ | `api/server.py` | FastAPI 怎么和 Agent 结合，异步任务怎么触发 |
 | 7️⃣ | `api/monitor.py` | WebSocket 实时推送，事件循环归属判断 |
@@ -274,7 +282,8 @@ deep_search_pro/
 │   └── markdown.js                 # 安全 Markdown 渲染
 │
 ├── tools/                          # 🔧 工具函数（@tool）
-│   ├── tavily_tool.py              # 网络搜索
+│   ├── aliyun_search_tool.py        # 百炼 Qwen 内置联网搜索
+│   ├── tavily_tool.py               # 旧导入路径兼容层
 │   ├── db_tools.py                 # 数据库查询 3 件套
 │   ├── ragflow_tools.py            # RAGFlow 知识库检索
 │   ├── markdown_tools.py           # 生成 Markdown
@@ -333,6 +342,45 @@ Trace 事件会包含 `event_id`、`sequence`、`thread_id`、`run_id`、`event`
 
 ---
 
+## 🧠 三层记忆与续聊
+
+系统使用 `data/memory.db` 保存聊天历史和应用层记忆，使用 `data/checkpoints.db` 保存 LangGraph 图状态；两个数据库都在服务重启后保留。前端重新打开同一个 `thread_id` 后，新问题会沿用该线程的 checkpoint：
+
+1. **最近对话**：应用层默认保留最近 8 轮原文，便于旧会话首次迁移到 checkpoint 时理解“它”“上一份文档”等上下文。
+2. **会话摘要**：应用层将更早内容折叠为最多 800 个字符的滚动摘要；已建立 checkpoint 的会话由 DeepAgents/LangGraph 保留和整理图内消息，不会每轮重复注入应用层历史。
+3. **长期记忆**：跨会话保存用户明确要求记住的稳定偏好和项目配置，每次最多注入 5 条相关内容。
+
+长期记忆采用明确授权：系统不会自动把普通聊天推断成用户事实。可以直接在聊天中使用：
+
+```text
+记住：以后优先使用中文回答
+你记得我什么？
+忘记：中文回答
+```
+
+密码、API Key 和访问令牌会被拒绝写入长期记忆。完整聊天记录保存在应用层 SQLite 中；已有 checkpoint 的会话只更新相关长期记忆，不重复注入应用层历史。新建 checkpoint 前，旧会话迁移上下文受以下参数限制：
+
+```dotenv
+MEMORY_DB_PATH=data/memory.db
+MEMORY_RECENT_TURNS=8
+MEMORY_SUMMARY_MAX_CHARS=800
+MEMORY_LONG_TERM_MAX_ITEMS=5
+CHECKPOINT_DB_PATH=data/checkpoints.db
+```
+
+续聊时要保留原 `thread_id`（例如打开 `/?thread_id=...`）；点击“新对话”会生成新 ID。清空会话会同时删除聊天记录和 LangGraph checkpoint，但不会删除跨会话长期记忆。运行轨迹仍保存在进程内，重启后可能无法查看旧 Trace；这不影响已持久化的对话和续聊。
+
+记忆接口：
+
+```text
+GET    /api/memory/threads/{thread_id}   获取持久化对话
+DELETE /api/memory/threads/{thread_id}   清空某个会话记忆
+GET    /api/memories                     查看长期记忆
+DELETE /api/memories/{memory_id}         删除指定长期记忆
+```
+
+---
+
 ## 🧪 测试
 
 Python 测试：
@@ -382,7 +430,7 @@ pytest -q
 
 ### 进阶级（工程能力）
 
-- [ ] **把 InMemorySaver 换成 SqliteSaver**：让 Agent 对话历史持久化，重启不丢失
+- [x] **加入 SQLite 三层记忆**：最近对话、滚动摘要和长期记忆在重启后仍可恢复
 - [ ] **把 Trace store 持久化**：用 SQLite 或 Redis 保存 `run_id` 轨迹
 - [ ] **给 Trace 事件加导出**：把某次运行导出成 JSON / Markdown 调试报告
 - [ ] **给子智能体加"反思"机制**：让子智能体执行完后再自我检查一遍，提高准确性
@@ -407,7 +455,7 @@ pytest -q
 | Web 框架 | FastAPI + Uvicorn | 异步 HTTP + 原生 WebSocket |
 | 前端 | HTML + CSS + 原生 ES Modules | 无构建步骤，适合学习和调试 |
 | Trace | 进程内 run 级事件存储 | 支持分页、断点恢复和前端去重 |
-| 搜索引擎 | Tavily API | AI 专用搜索，提供免费额度 |
+| 搜索引擎 | 阿里云百炼 Qwen 内置搜索 | 与主模型共用 API Key，无需 Tavily |
 | 知识库 | RAGFlow | 开源的 RAG 引擎，可以本地部署 |
 | 数据库 | MySQL | 关系型数据库，Agent 自动写 SQL |
 | 文档生成 | markdown + pywin32 | MD 生成 + Word COM 转 PDF |
@@ -423,7 +471,7 @@ pytest -q
 
 ### Q: 没有 RAGFlow 和 MySQL，项目还能跑吗?
 
-**A:** 能。主智能体会根据 system_prompt 判断只有"网络搜索"可用，自动跳过另外两个子智能体。只配 LLM + Tavily 就能体验完整链路。当然功能会受限——这就是刻意设计的"优雅降级"。
+**A:** 能。主智能体会根据 system_prompt 判断只有“网络搜索”可用，自动跳过另外两个子智能体。只配置百炼 API Key、API Host 和模型名，就能使用主模型与内置联网搜索。当然功能会受限——这就是刻意设计的“优雅降级”。
 
 ### Q: 为什么用 ContextVar 而不是全局变量？
 

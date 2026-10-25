@@ -71,27 +71,39 @@ function nodeStatus(snapshot, nodeId) {
 
 function nodeDetail(snapshot, nodeId, status) {
   if (nodeId === "input") {
-    return snapshot.query || "Awaiting submission";
+    return snapshot.query || "等待提交";
   }
   if (nodeId === "output") {
-    if (status === "completed") return "Final result received";
-    if (status === "failed") return "Run failed";
-    if (status === "unknown") return "Completed without output";
-    return "Awaiting completion";
+    if (status === "completed") return "已收到最终结果";
+    if (status === "failed") return "运行失败";
+    if (status === "unknown") return "已完成，但没有输出";
+    return "等待完成";
   }
   if (nodeId === "synthesis") {
-    return status === "unknown" ? "No explicit event" : "Explicit model/report event";
+    return status === "unknown" ? "暂无明确事件" : "已观察到模型或报告事件";
   }
   const role = snapshot.roles[nodeId];
   if (!role?.lastEvent) {
     return nodeId === "files" && snapshot.files.length
-      ? `${snapshot.files.length} files observed`
-      : "Not invoked";
+      ? `已观察到 ${snapshot.files.length} 个文件`
+      : "尚未调用";
   }
   if (role.status === "waiting") {
-    return "Completion not emitted";
+    return "尚未收到完成事件";
   }
-  return role.lastEvent.message || role.lastEvent.event || "Event observed";
+  return role.lastEvent.message || role.lastEvent.event || "已观察到事件";
+}
+
+function statusLabel(status) {
+  return {
+    idle: "空闲",
+    active: "执行中",
+    waiting: "等待中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+    unknown: "未知",
+  }[status] || status;
 }
 
 export class ExecutionVisualizer {
@@ -161,7 +173,7 @@ export class ExecutionVisualizer {
       const status = nodeStatus(snapshot, id);
       this.statuses[id] = status;
       node.dataset.status = status;
-      node.querySelector(".badge").textContent = status;
+      node.querySelector(".badge").textContent = statusLabel(status);
       node.querySelector(".node-detail").textContent = nodeDetail(snapshot, id, status);
     }
     this.drawEdges();

@@ -12,7 +12,7 @@ async function parseResponse(response) {
     const detail = payload && typeof payload === "object"
       ? payload.detail || payload.error
       : payload;
-    throw new Error(detail || `Request failed with HTTP ${response.status}`);
+    throw new Error(detail || `请求失败，HTTP 状态码：${response.status}`);
   }
 
   if (payload && typeof payload === "object" && payload.error) {
@@ -48,6 +48,12 @@ export async function startTask(query, threadId) {
 export async function fetchThreadRuns(threadId) {
   return parseResponse(await fetch(
     `/api/threads/${encodeURIComponent(threadId)}/runs`,
+  ));
+}
+
+export async function fetchConversation(threadId) {
+  return parseResponse(await fetch(
+    `/api/memory/threads/${encodeURIComponent(threadId)}`,
   ));
 }
 

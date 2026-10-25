@@ -1,20 +1,28 @@
 from agent.subagents.knowledge_base_agent import knowledge_base_agent
 from agent.subagents.database_query_agent import database_query_agent
 from agent.subagents.network_search_agent import network_search_agent
-from langgraph.checkpoint.memory import InMemorySaver
 
 # main_agent tool导入
 from tools.markdown_tools import generate_markdown
+from tools.memory_tools import (
+    forget_user_memory,
+    list_user_memories,
+    remember_user_memory,
+)
 from tools.pdf_tools import convert_md_to_pdf
 from tools.upload_file_read_tool import read_file_content
 
 from deepagents import create_deep_agent
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from agent.llm import model
+from agent.llm import fast_model, model
+from agent.checkpoint_store import open_checkpointer
 from agent.prompts import main_agent_content
 
 from api.monitor import monitor
+from api.memory_store import memory_store
 import asyncio
+import os
 import uuid
 import shutil
 import time
@@ -36,17 +44,76 @@ from api.context import (
 )
 from api.trace_models import TraceEventType, TraceNodeType, TraceStatus
 
-main_agent = create_deep_agent(
-   model = model,
-   system_prompt=main_agent_content['system_prompt'],
-   tools= [generate_markdown,convert_md_to_pdf,read_file_content],
-   checkpointer=InMemorySaver(),
-   subagents=[
-       database_query_agent,
-       network_search_agent,
-       knowledge_base_agent
-   ]
-)
+
+def get_agent_recursion_limit() -> int:
+    """读取单次运行的图步骤上限，避免默认的 1000 步产生意外开销。"""
+    raw_value = os.getenv("AGENT_RECURSION_LIMIT", "40")
+    try:
+        return max(10, min(int(raw_value), 1000))
+    except ValueError:
+        return 40
+
+def create_main_agent(checkpointer):
+    return create_deep_agent(
+        model=model,
+        system_prompt=main_agent_content["system_prompt"],
+        tools=[
+            generate_markdown,
+            convert_md_to_pdf,
+            read_file_content,
+            remember_user_memory,
+            forget_user_memory,
+            list_user_memories,
+        ],
+        subagents=[
+            {**database_query_agent, "model": fast_model},
+            {**network_search_agent, "model": fast_model},
+            {**knowledge_base_agent, "model": fast_model},
+        ],
+        checkpointer=checkpointer,
+    )
+
+
+async def stream_conversation(task_query, session_id, run_id, path_instruction, config):
+    """Reuse graph state; seed existing SQLite chats once when no checkpoint exists."""
+    async with open_checkpointer() as checkpointer:
+        existing = await checkpointer.aget_tuple(config)
+        memory_action = memory_store.handle_explicit_command(task_query, session_id)
+        legacy_messages = []
+        if existing is None:
+            memory_store.ensure_conversation(session_id, task_query)
+            summary = memory_store.update_summary_if_needed(session_id)
+            if summary:
+                legacy_messages.append(SystemMessage(
+                    id="legacy-conversation-summary",
+                    content=f"【较早对话摘要】\n{summary}",
+                ))
+            for item in memory_store.get_messages(
+                session_id, limit=memory_store.recent_message_limit
+            ):
+                message_type = HumanMessage if item.role == "user" else AIMessage
+                legacy_messages.append(message_type(content=item.content[:1200]))
+        memory_context = memory_store.build_long_term_context(task_query)
+        if memory_action:
+            memory_context = "\n\n".join(
+                part for part in [memory_context, f"【已执行的记忆操作】\n{memory_action}"]
+                if part
+            )
+
+        # A fixed message ID replaces the previous memory snapshot in graph state.
+        # Recent conversation already lives in the checkpoint after the first run.
+        input_messages = [
+            SystemMessage(
+                id="application-memory-context",
+                content=memory_context or "本轮没有额外的长期记忆。",
+            ),
+            *legacy_messages,
+            {"role": "user", "content": task_query + path_instruction},
+        ]
+        memory_store.add_message(session_id, "user", task_query, run_id=run_id)
+        agent = create_main_agent(checkpointer)
+        async for chunk in agent.astream({"messages": input_messages}, config=config):
+            yield chunk
 
 # 执行
 """
@@ -227,7 +294,8 @@ async def run_deep_agent(
         config = {
             "configurable": {
                 "thread_id": session_id,
-            }
+            },
+            "recursion_limit": get_agent_recursion_limit(),
         }
         path_instruction = f"""
     【工作环境指令】
@@ -241,13 +309,9 @@ async def run_deep_agent(
     4. 若存在上传文件，请先分析内容
     """
 
-        async for chunk in main_agent.astream({
-            "messages":[
-                {
-                    "role":"user","content":task_query+path_instruction
-                }
-            ]
-        },config=config):
+        async for chunk in stream_conversation(
+            task_query, session_id, run_id, path_instruction, config
+        ):
             # {"model [大模型决定调用工具 子智能体  最终结果] / tools" : {messages:[xxx...]}}
             for node_name,state in chunk.items():
                 if not state or "messages" not in state: continue
@@ -335,6 +399,15 @@ async def run_deep_agent(
                                 )
 
         await settle_all_agents()
+
+        if final_output:
+            memory_store.add_message(
+                session_id,
+                "assistant",
+                final_output if isinstance(final_output, str) else str(final_output),
+                run_id=run_id,
+            )
+            memory_store.update_summary_if_needed(session_id)
 
         ended_at = datetime.now(timezone.utc)
         duration_ms = int((time.perf_counter() - started_monotonic) * 1_000)

@@ -3,6 +3,7 @@ import importlib.util
 import sys
 import tempfile
 import types
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from api.context import get_run_context, get_thread_context
@@ -41,8 +42,10 @@ class FakeDeepAgent:
     def __init__(self) -> None:
         self.fail = False
         self.chunks = None
+        self.last_config = None
 
     async def astream(self, payload, config):
+        self.last_config = config
         if self.fail:
             raise RuntimeError("model failure")
         if self.chunks is not None:
@@ -52,8 +55,36 @@ class FakeDeepAgent:
         yield {"model": {"messages": [FakeMessage()]}}
 
 
+class FakeMemoryStore:
+    def __init__(self) -> None:
+        self.messages = []
+        self.recent_message_limit = 16
+
+    def ensure_conversation(self, thread_id, query):
+        return None
+
+    def get_messages(self, thread_id, limit=None):
+        return []
+
+    def build_long_term_context(self, query):
+        return ""
+
+    def build_prompt_context(self, thread_id, query):
+        return ""
+
+    def handle_explicit_command(self, query, thread_id):
+        return ""
+
+    def add_message(self, thread_id, role, content, run_id=None):
+        self.messages.append((thread_id, role, content, run_id))
+
+    def update_summary_if_needed(self, thread_id):
+        return ""
+
+
 def load_main_agent_module(monkeypatch):
     fake_graph = FakeDeepAgent()
+    fake_memory_store = FakeMemoryStore()
 
     def module(name: str, **attributes):
         value = types.ModuleType(name)
@@ -74,10 +105,27 @@ def load_main_agent_module(monkeypatch):
         network_search_agent={},
     )
     module("tools.markdown_tools", generate_markdown=lambda: None)
+    module(
+        "tools.memory_tools",
+        remember_user_memory=lambda: None,
+        forget_user_memory=lambda: None,
+        list_user_memories=lambda: None,
+    )
     module("tools.pdf_tools", convert_md_to_pdf=lambda: None)
     module("tools.upload_file_read_tool", read_file_content=lambda: None)
     module("deepagents", create_deep_agent=lambda **kwargs: fake_graph)
-    module("agent.llm", model=object())
+
+    class FakeCheckpointer:
+        async def aget_tuple(self, config):
+            return None
+
+    @asynccontextmanager
+    async def fake_open_checkpointer():
+        yield FakeCheckpointer()
+
+    module("agent.checkpoint_store", open_checkpointer=fake_open_checkpointer)
+    module("agent.llm", model=object(), fast_model=object())
+    module("api.memory_store", memory_store=fake_memory_store)
     module("agent.prompts", main_agent_content={"system_prompt": "unchanged"})
     module("langgraph")
     module("langgraph.checkpoint")
@@ -102,7 +150,8 @@ def load_main_agent_module(monkeypatch):
 def test_run_lifecycle_completed_uses_one_root_entity(monkeypatch) -> None:
     async def scenario() -> None:
         await trace_store.clear_all()
-        loaded, _ = load_main_agent_module(monkeypatch)
+        monkeypatch.setenv("AGENT_RECURSION_LIMIT", "24")
+        loaded, fake_graph = load_main_agent_module(monkeypatch)
         with tempfile.TemporaryDirectory(
             prefix=".trace-test-",
             dir=Path.cwd(),
@@ -134,6 +183,7 @@ def test_run_lifecycle_completed_uses_one_root_entity(monkeypatch) -> None:
         assert events[-1].started_at == events[0].started_at
         assert events[-1].ended_at is not None
         assert events[-1].duration_ms is not None
+        assert fake_graph.last_config["recursion_limit"] == 24
         assert get_thread_context() is None
         assert get_run_context() is None
 

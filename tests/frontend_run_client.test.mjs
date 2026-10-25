@@ -13,9 +13,14 @@ test("restore keeps a new thread idle when it has no runs", async (context) => {
       patches.push(values);
       Object.assign(this.snapshot, values);
     },
+    setHistoryMessages(messages) {
+      this.snapshot.historyMessages = messages;
+    },
   };
-  context.mock.method(globalThis, "fetch", async () => new Response(
-    JSON.stringify({ runs: [] }),
+  context.mock.method(globalThis, "fetch", async (url) => new Response(
+    JSON.stringify(url.includes("/api/memory/threads/")
+      ? { messages: [{ role: "user", content: "旧问题" }] }
+      : { runs: [] }),
     {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -26,6 +31,7 @@ test("restore keeps a new thread idle when it has no runs", async (context) => {
   const result = await client.restore({ threadId: "new-thread", runId: null });
 
   assert.equal(result, null);
+  assert.equal(store.snapshot.historyMessages[0].content, "旧问题");
   assert.deepEqual(patches.at(-1), {
     runId: null,
     taskStatus: "idle",

@@ -1,12 +1,13 @@
 import {
   connectTrace,
+  fetchConversation,
   fetchFiles,
   fetchThreadRuns,
   fetchTrace,
   startTask,
   uploadFiles,
-} from "./api.js?v=20260910-5";
-import { isTerminalStatus } from "./state.js?v=20260910-5";
+} from "./api.js?v=20261025-2";
+import { isTerminalStatus } from "./state.js?v=20261025-2";
 
 export class RunClient {
   constructor({ store, onNotice = () => {} }) {
@@ -46,21 +47,20 @@ export class RunClient {
     if (!threadId) return null;
     const generation = ++this.operationGeneration;
     this.store.patch({ threadId, runId });
+    await this.refreshConversation(threadId, generation);
+    if (generation !== this.operationGeneration) return null;
     const thread = await fetchThreadRuns(threadId);
     if (generation !== this.operationGeneration) return null;
     const summary = runId
       ? thread.runs?.find((item) => item.run_id === runId)
       : thread.runs?.[0];
     if (!summary) {
-      if (!runId) {
-        this.store.patch({
-          runId: null,
-          taskStatus: "idle",
-          connection: "idle",
-        });
-        return null;
-      }
-      throw new Error("当前运行记录已不可用。");
+      this.store.patch({
+        runId: null,
+        taskStatus: "idle",
+        connection: "idle",
+      });
+      return null;
     }
 
     this.store.patch({ runId: summary.run_id });
@@ -85,6 +85,25 @@ export class RunClient {
       this.connect();
     }
     return summary;
+  }
+
+  async refreshConversation(
+    threadId = this.store.snapshot.threadId,
+    generation = this.operationGeneration,
+  ) {
+    if (!threadId) return [];
+    try {
+      const result = await fetchConversation(threadId);
+      if (generation !== this.operationGeneration) return [];
+      const messages = result.messages || [];
+      this.store.setHistoryMessages(messages);
+      return messages;
+    } catch (error) {
+      if (generation !== this.operationGeneration) return [];
+      this.store.addClientError(error.message, "memory");
+      this.onNotice(`无法读取持久化历史：${error.message}。请重启后端服务后重试。`, true);
+      return [];
+    }
   }
 
   async refreshFiles(
@@ -172,6 +191,7 @@ export class RunClient {
         }
         if (added && ["run_completed", "run_failed"].includes(message.event)) {
           this.refreshFiles();
+          this.refreshConversation();
           globalThis.clearInterval(this.heartbeatTimer);
         }
       },
@@ -186,7 +206,7 @@ export class RunClient {
         this.store.setConnection("disconnected");
         if (event.code === 4404) {
           this.store.addClientError(
-            "The saved run is no longer available in the trace store.",
+            "已保存的运行记录已不在追踪存储中。",
             "websocket",
           );
           this.onNotice("当前运行记录已过期，请重新运行任务。", true);

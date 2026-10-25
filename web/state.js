@@ -2,24 +2,24 @@ const STORAGE_KEY = "deep-search-pro.console.v1";
 
 export const ROLE_DEFINITIONS = {
   main: {
-    label: "Main Agent",
-    purpose: "Orchestrates research and produces the final response.",
+    label: "主智能体",
+    purpose: "负责统筹研究流程并生成最终答复。",
   },
   network: {
-    label: "Network Search",
-    purpose: "Finds current public information through Tavily.",
+    label: "网络搜索",
+    purpose: "通过阿里云百炼 Qwen 内置搜索查找最新公开信息。",
   },
   database: {
-    label: "Database Query",
-    purpose: "Inspects MySQL tables and executes database queries.",
+    label: "数据库查询",
+    purpose: "检查 MySQL 数据表并执行数据库查询。",
   },
   knowledge: {
-    label: "Knowledge Base",
-    purpose: "Queries configured RAGFlow knowledge assistants.",
+    label: "知识库",
+    purpose: "查询已配置的企业或论文知识库。",
   },
   files: {
-    label: "Report / Files",
-    purpose: "Generates Markdown, PDF, and other task artifacts.",
+    label: "报告与文件",
+    purpose: "生成 Markdown、PDF 及其他任务产物。",
   },
 };
 
@@ -194,6 +194,8 @@ function initialSnapshot(selection = {}) {
     startedAt: null,
     endedAt: null,
     finalOutput: null,
+    historyMessages: [],
+    historyLoaded: false,
     files: [],
   };
 }
@@ -384,6 +386,13 @@ export class ConsoleStore {
 
   setFiles(files) {
     this.patch({ files: Array.isArray(files) ? files : [] });
+  }
+
+  setHistoryMessages(messages) {
+    this.patch({
+      historyMessages: Array.isArray(messages) ? messages : [],
+      historyLoaded: true,
+    });
   }
 }
 

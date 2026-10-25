@@ -4,7 +4,7 @@ import mimetypes
 import sys
 import uvicorn
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +21,8 @@ if str(project_root) not in sys.path:
 from api.monitor import manager
 from api.trace_router import router as trace_router
 from api.trace_store import trace_store
+from api.memory_store import memory_store
+from agent.checkpoint_store import delete_thread_checkpoint
 
 app = FastAPI(title="DeepAgents API")
 app.include_router(trace_router)
@@ -102,6 +104,43 @@ async def run_task(request: TaskRequest) -> Dict[str, str]:
         "thread_id": thread_id,
         "run_id": run_id,
     }
+
+
+@app.get("/api/memory/threads/{thread_id}")
+async def get_conversation_memory(thread_id: str) -> Dict:
+    """返回持久化对话；即使运行轨迹已过期也可以恢复聊天内容。"""
+    return memory_store.conversation_payload(thread_id)
+
+
+@app.delete("/api/memory/threads/{thread_id}")
+async def clear_conversation_memory(thread_id: str) -> Dict[str, object]:
+    await delete_thread_checkpoint(thread_id)
+    return {"status": "cleared", "deleted": memory_store.clear_conversation(thread_id)}
+
+
+@app.get("/api/memories")
+async def get_long_term_memories() -> Dict[str, object]:
+    items = memory_store.list_memories(limit=100)
+    return {
+        "memories": [
+            {
+                "id": item.id,
+                "category": item.category,
+                "content": item.content,
+                "source_thread_id": item.source_thread_id,
+                "created_at": item.created_at,
+                "updated_at": item.updated_at,
+            }
+            for item in items
+        ]
+    }
+
+
+@app.delete("/api/memories/{memory_id}")
+async def delete_long_term_memory(memory_id: str) -> Dict[str, str]:
+    if not memory_store.delete_memory(memory_id):
+        raise HTTPException(status_code=404, detail="memory not found")
+    return {"status": "deleted", "id": memory_id}
 
 
 @app.post("/api/upload")

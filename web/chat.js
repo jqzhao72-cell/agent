@@ -1,4 +1,4 @@
-import { downloadUrl } from "./api.js?v=20260910-5";
+import { downloadUrl } from "./api.js?v=20261024-1";
 import {
   createFrameScheduler,
   createRenderBatch,
@@ -13,16 +13,16 @@ import {
   shouldRestoreRenderAnchor,
   shouldSubmitOnEnter,
   takeRenderBatch,
-} from "./chat-interactions.js?v=20260910-5";
-import { renderMarkdown } from "./markdown.js?v=20260910-5";
-import { RunClient } from "./run-client.js?v=20260910-5";
+} from "./chat-interactions.js?v=20261024-1";
+import { renderMarkdown } from "./markdown.js?v=20261024-1";
+import { RunClient } from "./run-client.js?v=20261025-2";
 import {
   createSessionRecord,
   parseChatSelection,
   SessionRepository,
   traceUrl,
-} from "./session.js?v=20260910-5";
-import { ConsoleStore, isTerminalStatus, ROLE_DEFINITIONS } from "./state.js?v=20260910-5";
+} from "./session.js?v=20261024-1";
+import { ConsoleStore, isTerminalStatus, ROLE_DEFINITIONS } from "./state.js?v=20261025-2";
 
 const elements = Object.fromEntries(
   [...document.querySelectorAll("[id]")].map((element) => [element.id, element]),
@@ -52,6 +52,10 @@ const initialSelection = parseChatSelection(
 );
 const store = new ConsoleStore(initialSelection);
 const runClient = new RunClient({ store, onNotice: showNotice });
+const shouldRestoreInitialSession = Boolean(
+  new URLSearchParams(window.location.search).get("thread_id")
+  || savedSession?.threadId,
+);
 
 let queuedFiles = [];
 let pendingQuery = "";
@@ -81,6 +85,29 @@ function makeElement(tag, className = "", text) {
 
 function statusLabel(status) {
   return TASK_LABELS[status] || status || "未知";
+}
+
+function eventLabel(event) {
+  return {
+    run_started: "任务已开始",
+    run_completed: "任务已完成",
+    run_failed: "任务失败",
+    agent_started: "智能体已启动",
+    agent_completed: "智能体已完成",
+    agent_failed: "智能体失败",
+    tool_started: "工具已启动",
+    tool_completed: "工具已完成",
+    tool_failed: "工具失败",
+    model_started: "模型已启动",
+    model_completed: "模型已完成",
+    model_failed: "模型失败",
+    retrieval_started: "检索已启动",
+    retrieval_completed: "检索已完成",
+    retrieval_failed: "检索失败",
+    report_started: "报告生成已启动",
+    report_completed: "报告生成已完成",
+    report_failed: "报告生成失败",
+  }[event] || event || "未知事件";
 }
 
 function isBusy(status) {
@@ -201,7 +228,7 @@ function renderHeader(snapshot) {
   const current = repository.list().find((item) => item.threadId === snapshot.threadId);
   const title = snapshot.query || pendingQuery || current?.title || "新对话";
   elements["thread-title"].textContent = title.slice(0, 48);
-  elements["thread-id"].textContent = `Thread ${shortId(snapshot.threadId)}`;
+  elements["thread-id"].textContent = `线程 ${shortId(snapshot.threadId)}`;
 
   const displayStatus = snapshot.connection === "disconnected" && snapshot.taskStatus === "running"
     ? "disconnected"
@@ -273,7 +300,7 @@ function renderProgress(snapshot, article) {
       ? "任务已取消"
       : "正在检索与分析";
   heading.append(makeElement("span", "", headingText));
-  heading.append(makeElement("span", "", `${snapshot.events.length} events`));
+  heading.append(makeElement("span", "", `${snapshot.events.length} 条事件`));
   panel.append(heading);
 
   const list = makeElement("ol", "progress-steps");
@@ -292,7 +319,7 @@ function renderProgress(snapshot, article) {
     item.append(makeElement(
       "code",
       "",
-      role.lastEvent?.event || statusLabel(role.status),
+      role.lastEvent?.event ? eventLabel(role.lastEvent.event) : statusLabel(role.status),
     ));
     list.append(item);
   }
@@ -333,17 +360,49 @@ function renderGeneratedFiles(snapshot, article) {
 
 function renderConversation(snapshot) {
   const query = pendingQuery || snapshot.query;
-  const hasConversation = Boolean(query || snapshot.runId || snapshot.events.length);
+  const historyMessages = Array.isArray(snapshot.historyMessages)
+    ? snapshot.historyMessages
+    : [];
+  const currentUserStored = historyMessages.some(
+    (item) => item.run_id === snapshot.runId && item.role === "user",
+  );
+  const currentAssistantStored = historyMessages.some(
+    (item) => item.run_id === snapshot.runId && item.role === "assistant",
+  );
+  const hasConversation = Boolean(
+    historyMessages.length || query || snapshot.runId || snapshot.events.length,
+  );
   elements["empty-state"].classList.toggle("hidden", hasConversation);
   const fragment = document.createDocumentFragment();
 
-  if (query) {
+  for (const item of historyMessages) {
+    if (item.role === "user") {
+      const userMessage = makeElement("article", "message user-message");
+      userMessage.append(makeElement("div", "user-bubble", item.content));
+      fragment.append(userMessage);
+      continue;
+    }
+    if (item.role === "assistant") {
+      const assistant = makeElement("article", "message assistant-message");
+      assistant.append(makeAssistantHeading());
+      const body = makeElement("div", "markdown-body");
+      renderMarkdown(item.content, body);
+      assistant.append(body);
+      if (item.run_id === snapshot.runId) {
+        renderAnswerMeta(snapshot, assistant);
+        renderGeneratedFiles(snapshot, assistant);
+      }
+      fragment.append(assistant);
+    }
+  }
+
+  if (query && !currentUserStored) {
     const userMessage = makeElement("article", "message user-message");
     userMessage.append(makeElement("div", "user-bubble", query));
     fragment.append(userMessage);
   }
 
-  if (hasConversation) {
+  if ((snapshot.runId || pendingQuery) && !currentAssistantStored) {
     const assistant = makeElement("article", "message assistant-message");
     assistant.append(makeAssistantHeading());
     if (snapshot.finalOutput !== null && !pendingQuery) {
@@ -498,9 +557,32 @@ function newSession() {
   elements["task-input"].focus();
 }
 
+function markMissingRunCancelled(session) {
+  const saved = repository.list().find((item) => item.threadId === session.threadId);
+  if (!saved || !isBusy(saved.status)) return;
+  repository.save(createSessionRecord({
+    threadId: saved.threadId,
+    runId: null,
+    query: saved.query,
+    status: "cancelled",
+    updatedAt: saved.updatedAt,
+  }));
+  store.patch({ runId: null, taskStatus: "cancelled", connection: "idle" });
+}
+
 async function activateSession(session) {
   if (session.threadId === store.snapshot.threadId) {
     closeSidebar();
+    if (!store.snapshot.historyLoaded && !isBusy(store.snapshot.taskStatus)) {
+      try {
+        const restored = await runClient.restore(session);
+        if (!restored) markMissingRunCancelled(session);
+      } catch (error) {
+        store.patch({ runId: null, taskStatus: "idle", connection: "idle" });
+        showNotice(`无法恢复会话：${error.message}`, true);
+      }
+    }
+    elements["task-input"].focus();
     return;
   }
   runClient.close();
@@ -519,7 +601,9 @@ async function activateSession(session) {
   history.replaceState(null, "", `/?${query}`);
   closeSidebar();
   try {
-    await runClient.restore(session);
+    const restored = await runClient.restore(session);
+    if (!restored) markMissingRunCancelled(session);
+    elements["task-input"].focus();
   } catch (error) {
     store.patch({ runId: null, taskStatus: "idle", connection: "idle" });
     showNotice(`无法恢复会话：${error.message}`, true);
@@ -527,9 +611,16 @@ async function activateSession(session) {
 }
 
 async function restoreInitialSession() {
-  if (!initialSelection.runId) return;
+  if (!shouldRestoreInitialSession) return;
   try {
-    await runClient.restore(initialSelection);
+    const restored = await runClient.restore(initialSelection);
+    if (!restored) {
+      markMissingRunCancelled(
+        repository.list().find((item) => item.threadId === initialSelection.threadId)
+          || initialSelection,
+      );
+    }
+    elements["task-input"].focus();
   } catch (error) {
     store.patch({ runId: null, taskStatus: "idle", connection: "idle" });
     showNotice(`无法恢复会话：${error.message}`, true);

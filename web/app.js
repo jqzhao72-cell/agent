@@ -1,21 +1,21 @@
-import { downloadUrl } from "./api.js?v=20260910-5";
-import { renderMarkdown, stringifyValue } from "./markdown.js?v=20260910-5";
-import { RunClient } from "./run-client.js?v=20260910-5";
+import { downloadUrl } from "./api.js?v=20261024-1";
+import { renderMarkdown, stringifyValue } from "./markdown.js?v=20261024-1";
+import { RunClient } from "./run-client.js?v=20261024-1";
 import {
   chatUrl,
   createSessionRecord,
   parseTraceSelection,
   restoredQuery,
   SessionRepository,
-} from "./session.js?v=20260910-5";
+} from "./session.js?v=20261024-1";
 import {
   ConsoleStore,
   ROLE_DEFINITIONS,
-} from "./state.js?v=20260910-5";
+} from "./state.js?v=20261024-1";
 import {
   ExecutionVisualizer,
   statusForNode,
-} from "./visualizer.js?v=20260910-5";
+} from "./visualizer.js?v=20261024-1";
 import {
   traceCallRecords,
   traceRecordKind,
@@ -24,7 +24,7 @@ import {
   traceRecordSearchText,
   traceRecordStatusLabel,
   traceValueSummary,
-} from "./trace-record.js?v=20260910-5";
+} from "./trace-record.js?v=20261024-1";
 
 const repository = new SessionRepository();
 const fallback = repository.list()[0] || {};
@@ -73,12 +73,43 @@ function formatIdentifier(value) {
 }
 
 function formatStatus(status) {
-  if (!status) return "Unknown";
-  return status.charAt(0).toUpperCase() + status.slice(1);
+  return {
+    idle: "空闲",
+    active: "执行中",
+    pending: "等待中",
+    waiting: "等待中",
+    uploading: "正在上传",
+    starting: "正在启动",
+    restoring: "正在恢复",
+    running: "执行中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+    unknown: "未知",
+  }[status] || status || "未知";
 }
 
 function formatEventName(event) {
-  return String(event || "unknown").replaceAll("_", " ");
+  return {
+    run_started: "任务已开始",
+    run_completed: "任务已完成",
+    run_failed: "任务失败",
+    agent_started: "智能体已启动",
+    agent_completed: "智能体已完成",
+    agent_failed: "智能体失败",
+    tool_started: "工具已启动",
+    tool_completed: "工具已完成",
+    tool_failed: "工具失败",
+    model_started: "模型已启动",
+    model_completed: "模型已完成",
+    model_failed: "模型失败",
+    retrieval_started: "检索已启动",
+    retrieval_completed: "检索已完成",
+    retrieval_failed: "检索失败",
+    report_started: "报告生成已启动",
+    report_completed: "报告生成已完成",
+    report_failed: "报告生成失败",
+  }[event] || String(event || "未知事件").replaceAll("_", " ");
 }
 
 function formatTime(value, includeDate = false) {
@@ -96,14 +127,14 @@ function formatTime(value, includeDate = false) {
 
 function formatDuration(milliseconds) {
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return "—";
-  if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
+  if (milliseconds < 1000) return `${Math.round(milliseconds)} 毫秒`;
   const seconds = Math.floor(milliseconds / 1000);
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const remainder = seconds % 60;
-  if (hours) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
-  if (minutes) return `${minutes}m ${String(remainder).padStart(2, "0")}s`;
-  return `${remainder}s`;
+  if (hours) return `${hours} 小时 ${String(minutes).padStart(2, "0")} 分`;
+  if (minutes) return `${minutes} 分 ${String(remainder).padStart(2, "0")} 秒`;
+  return `${remainder} 秒`;
 }
 
 function showNotice(message, sticky = false) {
@@ -134,23 +165,23 @@ function syncViewUrl() {
 
 function taskLabel(status) {
   return {
-    idle: "Idle",
-    uploading: "Uploading",
-    starting: "Starting",
-    restoring: "Restoring",
-    running: "Running",
-    completed: "Completed",
-    failed: "Failed",
-    cancelled: "Cancelled",
+    idle: "空闲",
+    uploading: "正在上传",
+    starting: "正在启动",
+    restoring: "正在恢复",
+    running: "正在运行",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
   }[status] || formatStatus(status);
 }
 
 function connectionLabel(status) {
   return {
-    idle: store.snapshot.runId ? "Trace loaded" : "No active run",
-    connecting: "Connecting",
-    connected: "Live connection",
-    disconnected: "Disconnected",
+    idle: store.snapshot.runId ? "追踪记录已加载" : "暂无运行",
+    connecting: "正在连接",
+    connected: "实时连接",
+    disconnected: "连接已断开",
   }[status] || formatStatus(status);
 }
 
@@ -202,7 +233,7 @@ function renderHeader(snapshot) {
     snapshot.taskStatus,
   );
   elements["run-button"].disabled = busy || !elements["task-input"].value.trim();
-  elements["run-button"].textContent = busy ? taskLabel(snapshot.taskStatus) : "Run search";
+  elements["run-button"].textContent = busy ? taskLabel(snapshot.taskStatus) : "运行检索";
 }
 
 function renderMetrics(snapshot) {
@@ -236,14 +267,14 @@ function renderAgents(snapshot) {
     badge.dataset.status = role.status;
     card.querySelector("[data-agent-event]").textContent = role.lastEvent
       ? role.lastEvent.message || formatEventName(role.lastEvent.event)
-      : "No events observed";
+      : "未观察到事件";
     card.querySelector("[data-agent-availability]").textContent = role.observed
-      ? "Observed in trace"
-      : "Availability unreported";
+      ? "追踪中已观察到"
+      : "状态未报告";
     card.querySelector("[data-agent-count]").textContent =
-      `${role.count} ${role.count === 1 ? "trigger" : "triggers"}`;
+      `${role.count} 次触发`;
   }
-  elements["active-role-count"].textContent = `${activeCount} active`;
+  elements["active-role-count"].textContent = `${activeCount} 个活跃`;
 }
 
 function openInspector(nextSelection, trigger = document.activeElement) {
@@ -339,9 +370,9 @@ function renderReport(snapshot) {
   if (snapshot.finalOutput === null || snapshot.finalOutput === undefined) {
     const empty = makeElement("div", "empty-state");
     empty.append(
-      "The final Markdown report appears after a real ",
+      "收到真实的 ",
       makeElement("code", "", "run_completed"),
-      " event.",
+      " 事件后，这里会显示最终 Markdown 报告。",
     );
     elements["final-report"].replaceChildren(empty);
     return;
@@ -350,7 +381,7 @@ function renderReport(snapshot) {
     elements["final-report"].replaceChildren(makeElement(
       "div",
       "empty-state",
-      "The run completed without report content.",
+      "任务已完成，但没有报告内容。",
     ));
     return;
   }
@@ -377,8 +408,8 @@ function renderFiles(snapshot) {
       "div",
       "empty-state",
       snapshot.outputPath
-        ? "No generated files found in the session directory."
-        : "Generated files appear after the backend creates a session directory.",
+        ? "会话目录中没有找到生成文件。"
+        : "后端创建会话目录后，生成文件会显示在这里。",
     ));
     return;
   }
@@ -386,9 +417,9 @@ function renderFiles(snapshot) {
   const fragment = document.createDocumentFragment();
   for (const file of snapshot.files) {
     const row = makeElement("div", "file-row");
-    const name = makeElement("strong", "", file.name || "Unnamed file");
+    const name = makeElement("strong", "", file.name || "未命名文件");
     name.title = file.path || file.name || "";
-    const link = makeElement("a", "", "Download");
+    const link = makeElement("a", "", "下载");
     link.href = downloadUrl(file.path);
     link.setAttribute("download", file.name || "");
     const modified = Number(file.mtime) * 1000;
@@ -411,7 +442,7 @@ function renderFiles(snapshot) {
 function renderRaw(snapshot) {
   const traceEvents = snapshot.rawTraceEvents || snapshot.events;
   if (!traceEvents.length && !snapshot.rawMessages.length && !snapshot.clientErrors.length) {
-    elements["raw-events"].textContent = "No WebSocket messages received.";
+    elements["raw-events"].textContent = "尚未收到 WebSocket 消息。";
     return;
   }
   elements["raw-events"].textContent = JSON.stringify({
@@ -456,13 +487,13 @@ function selectedTitle(snapshot) {
     return event ? traceRecordName(event) : "调用记录";
   }
   return {
-    input: "User Request",
-    synthesis: "Main Agent Synthesis",
-    output: "Final Output",
+    input: "用户请求",
+    synthesis: "主智能体汇总",
+    output: "最终输出",
     ...Object.fromEntries(
       Object.entries(ROLE_DEFINITIONS).map(([id, definition]) => [id, definition.label]),
     ),
-  }[selected.id] || "Inspector";
+  }[selected.id] || "详情检查";
 }
 
 function detailList(rows) {
@@ -587,7 +618,7 @@ function render(snapshot) {
 async function runSearch() {
   const query = elements["task-input"].value.trim();
   if (!query) {
-    showNotice("Enter a research task before starting.");
+    showNotice("请输入研究任务后再开始。 ");
     elements["task-input"].focus();
     return;
   }
@@ -622,8 +653,8 @@ async function runSearch() {
 
 function updateUploadMeta() {
   elements["upload-meta"].textContent = queuedFiles.length
-    ? `${queuedFiles.length} selected · ${queuedFiles.map((file) => file.name).join(", ")}`
-    : "Drop files or browse";
+    ? `已选择 ${queuedFiles.length} 个文件 · ${queuedFiles.map((file) => file.name).join("、")}`
+    : "拖放文件或点击选择";
 }
 
 function setQueuedFiles(files) {
@@ -649,7 +680,7 @@ async function restoreSession() {
       taskStatus: "idle",
       connection: "idle",
     });
-    showNotice("The previous in-memory trace is no longer available. The thread ID was preserved.");
+    showNotice("之前的内存追踪记录已不可用，但线程 ID 已保留。");
   }
 }
 
@@ -692,7 +723,7 @@ elements["upload-zone"].addEventListener("drop", (event) => {
 elements["new-session"].addEventListener("click", () => {
   if (
     store.snapshot.taskStatus === "running"
-    && !window.confirm("The backend run will continue. Detach this console and create a new session?")
+    && !window.confirm("后端任务仍会继续运行。是否断开当前控制台并创建新会话？")
   ) {
     return;
   }
